@@ -1,0 +1,14 @@
+# Bazel build directories
+bazel-*
+external/
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts (keep the web build files)
+*.o
+*.a
