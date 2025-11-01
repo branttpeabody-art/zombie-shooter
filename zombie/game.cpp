@@ -1164,6 +1164,7 @@ namespace {
 
         // Render floor with very dark gradient (almost black)
         // Floor extends from horizon to bottom of screen
+        // Note: Blue safe room visible via blue walls only (floor raycasting was too slow)
         for (int y = horizonLine; y < SCREEN_HEIGHT; y++) {
             if (y < 0) continue;
             float gradient = (float)(y - horizonLine) / ((SCREEN_HEIGHT - horizonLine) > 0 ? (SCREEN_HEIGHT - horizonLine) : 1);
@@ -3836,8 +3837,16 @@ void Game::run() {
             // Separate timer from blood moon
             static float blueEventTimer = 0.0f;
 
-            if (!playState.blueAlertActive) {
+            if (!playState.blueAlertActive && !playState.hunterPhaseActive) {
                 blueEventTimer += deltaTime;
+
+                // Debug: show timer every 30 seconds
+                static float debugTimer = 0.0f;
+                debugTimer += deltaTime;
+                if (debugTimer >= 30.0f) {
+                    std::cout << "[DEBUG] Blue event timer: " << blueEventTimer << " / " << playState.blueAlertInterval << " seconds" << std::endl;
+                    debugTimer = 0.0f;
+                }
 
                 // Trigger blue alert every 3 minutes
                 if (blueEventTimer >= playState.blueAlertInterval) {
@@ -4467,7 +4476,23 @@ void Game::run() {
             int exitX = static_cast<int>(playState.player->getX() / Maze::TILE_SIZE);
             int exitY = static_cast<int>(playState.player->getY() / Maze::TILE_SIZE);
             int requiredKeys = playState.maze->getRequiredKeyCount(playState.currentLevel);
-            if (playState.maze->isExit(exitX, exitY) && playState.player->getKeys() >= requiredKeys) {
+
+            // ALWAYS require keys to exit - no exceptions for any difficulty!
+            bool hasAllKeys = (playState.player->getKeys() >= requiredKeys);
+            bool isOnExit = playState.maze->isExit(exitX, exitY);
+
+            // Warn player if they're at exit but don't have all keys
+            if (isOnExit && !hasAllKeys) {
+                static float lastWarningTime = 0.0f;
+                if (currentTime - lastWarningTime > 2000) {  // Show warning every 2 seconds
+                    int keysNeeded = requiredKeys - playState.player->getKeys();
+                    std::cout << "EXIT LOCKED! Need " << keysNeeded << " more key(s) to escape! ("
+                              << playState.player->getKeys() << "/" << requiredKeys << ")" << std::endl;
+                    lastWarningTime = currentTime;
+                }
+            }
+
+            if (isOnExit && hasAllKeys) {
                 // Bonus points for completing level
                 playState.score += 500;
 
