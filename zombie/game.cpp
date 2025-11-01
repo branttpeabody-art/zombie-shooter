@@ -335,13 +335,29 @@ namespace {
         bool godMode = false;  // Immortality
         int selectedWeaponSpawn = 0;  // For weapon spawning dropdown
         int selectedZombieType = 0;  // For zombie spawning
+        bool spawnAtCrosshair = false;  // If true, spawn at crosshair; if false, spawn at player
 
         // Blood Moon event (happens every 2 minutes for 30 seconds)
         float bloodMoonTimer = 0.0f;
         bool bloodMoonActive = false;
         float bloodMoonDuration = 30.0f;  // 30 seconds of blood moon
         float bloodMoonInterval = 120.0f;  // Every 2 minutes (120 seconds)
-        float bloodMoonSpawnMultiplier = 3.0f;  // Spawn 3x more zombies during event
+        float bloodMoonSpawnMultiplier = 8.0f;  // Spawn 8x more zombies during blood moon!
+
+        // Blue Alert event - player must evacuate to safe room
+        float blueAlertTimer = 0.0f;
+        bool blueAlertActive = false;
+        float blueAlertDuration = 45.0f;  // 45 seconds to reach safe room
+        float blueAlertInterval = 180.0f;  // Every 3 minutes (180 seconds)
+        int blueRoomX = -1, blueRoomY = -1;  // Safe room coordinates
+        bool inSafeRoom = false;  // Is player currently in safe room
+        bool safeRoomLocked = false;  // Room locks after alert ends
+
+        // Hunter Phase - dark entities chase player after failed evacuation
+        bool hunterPhaseActive = false;
+        float hunterPhaseTimer = 0.0f;
+        float hunterPhaseDuration = 60.0f;  // 1 minute of terror!
+        std::vector<std::unique_ptr<Zombie>> hunters;  // Dark fast entities
     };
 
     struct MenuState {
@@ -1184,6 +1200,7 @@ namespace {
             bool hit = false;
             int side = 0;  // 0 = vertical wall, 1 = horizontal wall
             float perpWallDist = 0.0f;
+            bool isSafeRoomWall = false;  // Track if we hit a safe room wall
 
             // DDA algorithm
             while (!hit && perpWallDist < 2000.0f) {
@@ -1199,6 +1216,8 @@ namespace {
 
                 if (state.maze->isWall(mapX, mapY)) {
                     hit = true;
+                    // Check if this is a safe room wall (but locked safe rooms act as walls)
+                    isSafeRoomWall = state.maze->isSafeRoom(mapX, mapY) && !state.safeRoomLocked;
                 }
             }
 
@@ -1219,19 +1238,37 @@ namespace {
             if (drawStart < 0) drawStart = 0;
             if (drawEnd >= SCREEN_HEIGHT) drawEnd = SCREEN_HEIGHT - 1;
 
-            // Color based on wall side and distance - MUCH DARKER with INTENSE FOG
-            int baseColor = side == 0 ? 35 : 25;  // Very dark gray/brown walls
-            // MUCH MORE INTENSE fog falloff - exponential for dramatic effect
-            float distanceFade = std::max(0.0f, 1.0f - perpWallDist / 400.0f);  // Shorter range
+            // Color based on wall type, side, and distance
+            int baseColor, colorR, colorG, colorB;
+            float distanceFade = std::max(0.0f, 1.0f - perpWallDist / 400.0f);  // Fog falloff
             distanceFade = distanceFade * distanceFade;  // Square it for exponential falloff
-            int color = static_cast<int>(baseColor * distanceFade);
 
-            // Add subtle texture variation based on wall position (blood stains, decay)
-            int colorVariation = ((mapX * 7 + mapY * 13) % 8) - 4;
-            color = std::max(0, std::min(255, color + colorVariation));
+            if (isSafeRoomWall) {
+                // BLUE SAFE ROOM WALLS - bright and glowing
+                int blueBase = side == 0 ? 180 : 150;  // Brighter blue for safe room
+                colorR = static_cast<int>(50 * distanceFade);   // Low red
+                colorG = static_cast<int>(120 * distanceFade);  // Medium green
+                colorB = static_cast<int>(blueBase * distanceFade);  // High blue
 
-            // Add eerie red tint to some walls (blood stained)
-            int redTint = ((mapX * 11 + mapY * 17) % 20) > 15 ? 10 : 0;
+                // Add pulsing glow effect to safe room
+                float pulseAmount = 0.5f + 0.5f * std::sin(SDL_GetTicks() * 0.003f);
+                colorB = std::min(255, static_cast<int>(colorB * (1.0f + 0.3f * pulseAmount)));
+            } else {
+                // Normal walls - dark and creepy
+                baseColor = side == 0 ? 35 : 25;  // Very dark gray/brown walls
+                int color = static_cast<int>(baseColor * distanceFade);
+
+                // Add subtle texture variation based on wall position (blood stains, decay)
+                int colorVariation = ((mapX * 7 + mapY * 13) % 8) - 4;
+                color = std::max(0, std::min(255, color + colorVariation));
+
+                // Add eerie red tint to some walls (blood stained)
+                int redTint = ((mapX * 11 + mapY * 17) % 20) > 15 ? 10 : 0;
+
+                colorR = color + redTint;
+                colorG = color * 0.8f;
+                colorB = color * 0.8f;
+            }
 
             // Calculate texture coordinate for brick pattern
             float wallX;
@@ -1242,36 +1279,54 @@ namespace {
             }
             wallX -= std::floor(wallX);
 
-            // Draw main wall column with blood-stained, decaying appearance
-            SDL_SetRenderDrawColor(renderer, color + redTint, color * 0.8f, color * 0.8f, 255);
+            // Draw main wall column
+            SDL_SetRenderDrawColor(renderer, colorR, colorG, colorB, 255);
             SDL_RenderDrawLine(renderer, x, drawStart, x, drawEnd);
 
-            // Draw optimized brick pattern (horizontal mortar lines) - darker mortar
             int wallHeightPx = drawEnd - drawStart;
-            int brickRows = 6;
-            for (int i = 1; i < brickRows; i++) {
-                int mortarY = drawStart + (wallHeightPx * i) / brickRows;
-                if (mortarY >= drawStart && mortarY < drawEnd) {
-                    SDL_SetRenderDrawColor(renderer, color * 0.3f + redTint, color * 0.3f, color * 0.3f, 255);
-                    SDL_RenderDrawPoint(renderer, x, mortarY);
-                }
-            }
 
-            // Draw vertical mortar lines based on texture coordinate - darker
-            int brickCol = (int)(wallX * 4);  // 4 bricks horizontally
-            if ((wallX * 4.0f - brickCol) < 0.1f) {  // Vertical mortar
-                for (int y = drawStart; y < drawEnd; y += 3) {  // Every 3rd pixel for performance
-                    SDL_SetRenderDrawColor(renderer, color * 0.3f + redTint, color * 0.3f, color * 0.3f, 255);
-                    SDL_RenderDrawPoint(renderer, x, y);
+            if (isSafeRoomWall) {
+                // Safe room gets glowing highlights instead of bricks
+                // Add bright vertical highlights to make it glow
+                if (((int)(wallX * 8) % 2) == 0) {  // Vertical glow lines
+                    for (int y = drawStart; y < drawEnd; y += 2) {
+                        SDL_SetRenderDrawColor(renderer,
+                            std::min(255, colorR + 30),
+                            std::min(255, colorG + 50),
+                            std::min(255, colorB + 60),
+                            255);
+                        SDL_RenderDrawPoint(renderer, x, y);
+                    }
                 }
-            }
+            } else {
+                // Normal walls get brick pattern and blood
+                // Draw optimized brick pattern (horizontal mortar lines) - darker mortar
+                int brickRows = 6;
+                for (int i = 1; i < brickRows; i++) {
+                    int mortarY = drawStart + (wallHeightPx * i) / brickRows;
+                    if (mortarY >= drawStart && mortarY < drawEnd) {
+                        SDL_SetRenderDrawColor(renderer, colorR * 0.3f, colorG * 0.3f, colorB * 0.3f, 255);
+                        SDL_RenderDrawPoint(renderer, x, mortarY);
+                    }
+                }
 
-            // Add creepy blood drips on some walls
-            if (redTint > 0 && wallHeightPx > 30) {
-                int dripY = drawStart + wallHeightPx / 3;
-                SDL_SetRenderDrawColor(renderer, 60, 10, 10, static_cast<int>(200 * distanceFade));
-                SDL_RenderDrawPoint(renderer, x, dripY);
-                SDL_RenderDrawPoint(renderer, x, dripY + 1);
+                // Draw vertical mortar lines based on texture coordinate - darker
+                int brickCol = (int)(wallX * 4);  // 4 bricks horizontally
+                if ((wallX * 4.0f - brickCol) < 0.1f) {  // Vertical mortar
+                    for (int y = drawStart; y < drawEnd; y += 3) {  // Every 3rd pixel for performance
+                        SDL_SetRenderDrawColor(renderer, colorR * 0.3f, colorG * 0.3f, colorB * 0.3f, 255);
+                        SDL_RenderDrawPoint(renderer, x, y);
+                    }
+                }
+
+                // Add creepy blood drips on some walls
+                int redTint = ((mapX * 11 + mapY * 17) % 20) > 15 ? 10 : 0;
+                if (redTint > 0 && wallHeightPx > 30) {
+                    int dripY = drawStart + wallHeightPx / 3;
+                    SDL_SetRenderDrawColor(renderer, 60, 10, 10, static_cast<int>(200 * distanceFade));
+                    SDL_RenderDrawPoint(renderer, x, dripY);
+                    SDL_RenderDrawPoint(renderer, x, dripY + 1);
+                }
             }
         }
 
@@ -1299,6 +1354,21 @@ namespace {
                 if (distance < 2000.0f && hasLineOfSight(state.maze.get(), playerX, playerY, zombie->getX(), zombie->getY())) {
                     sprites.push_back({zombie->getX(), zombie->getY(), distance, 0, {100, 255, 100, 255},
                                      zombie.get(), zombie->getHealth(), zombie->getMaxHealth()});  // Store zombie pointer and health
+                }
+            }
+        }
+
+        // Add hunters (scary dark entities with red eyes)
+        for (const auto& hunter : state.hunters) {
+            if (!hunter->isDead()) {
+                float dx = hunter->getX() - playerX;
+                float dy = hunter->getY() - playerY;
+                float distance = std::sqrt(dx * dx + dy * dy);
+
+                // Hunters need line-of-sight (can't see through walls)
+                if (distance < 2000.0f && hasLineOfSight(state.maze.get(), playerX, playerY, hunter->getX(), hunter->getY())) {
+                    sprites.push_back({hunter->getX(), hunter->getY(), distance, 0, {30, 30, 35, 255},  // Very dark gray/black
+                                     hunter.get(), hunter->getHealth(), hunter->getMaxHealth()});
                 }
             }
         }
@@ -1391,22 +1461,33 @@ namespace {
             int spriteScreenX = static_cast<int>((SCREEN_WIDTH / 2) * (1 + transformX / transformY / std::tan(FOV/2)));
 
             // Calculate sprite size (zombies are ENORMOUS, keys are 10x normal)
-            float sizeMultiplier;
-            if (sprite.type == 0) {
-                sizeMultiplier = 20.0f;  // Zombies 20x bigger
+            float heightMultiplier, widthMultiplier;
+
+            // Hunters (dark entities) are TALL and THIN like Endermen
+            if (sprite.type == 0 && sprite.color.r < 50 && sprite.color.g < 50 && sprite.color.b < 50) {
+                heightMultiplier = 35.0f;  // VERY tall like Enderman
+                widthMultiplier = 8.0f;    // Thin/narrow
+            } else if (sprite.type == 0) {
+                heightMultiplier = 20.0f;  // Zombies normal size
+                widthMultiplier = 20.0f;
             } else if (sprite.type == 1) {
-                sizeMultiplier = 5.0f;  // Keys 10x bigger
+                heightMultiplier = 5.0f;  // Keys
+                widthMultiplier = 5.0f;
             } else if (sprite.type == 2) {
-                sizeMultiplier = 5.0f;  // Weapon pickups 10x bigger
+                heightMultiplier = 5.0f;  // Weapon pickups
+                widthMultiplier = 5.0f;
             } else if (sprite.type == 4) {
-                sizeMultiplier = 5.0f;  // Exit door 10x bigger
+                heightMultiplier = 5.0f;  // Exit door
+                widthMultiplier = 5.0f;
             } else if (sprite.type == 5) {
-                sizeMultiplier = 5.0f;  // Health boosts 10x bigger
+                heightMultiplier = 5.0f;  // Health boosts
+                widthMultiplier = 5.0f;
             } else {
-                sizeMultiplier = 0.5f;  // Other sprites normal size
+                heightMultiplier = 0.5f;  // Other sprites
+                widthMultiplier = 0.5f;
             }
-            int spriteHeight = static_cast<int>(SCREEN_HEIGHT / transformY * sizeMultiplier);
-            int spriteWidth = spriteHeight;
+            int spriteHeight = static_cast<int>(SCREEN_HEIGHT / transformY * heightMultiplier);
+            int spriteWidth = static_cast<int>(SCREEN_HEIGHT / transformY * widthMultiplier);
 
             // Apply pitch offset for vertical look
             int drawStartY = SCREEN_HEIGHT / 2 - spriteHeight / 2 + pitchOffset;
@@ -1429,7 +1510,82 @@ namespace {
             spriteFogFactor = std::min(1.0f, spriteFogFactor);
             int fogOverlayAlpha = static_cast<int>(spriteFogFactor * spriteFogFactor * 180);  // Exponential
 
-            if (sprite.type == 0) {
+            // Check if this is a hunter (dark entity)
+            bool isHunter = (sprite.type == 0 && sprite.color.r < 50 && sprite.color.g < 50 && sprite.color.b < 50);
+
+            if (isHunter) {
+                // === HUNTER - SHADOWY ENDERMAN ===
+                // Pure dark shadowy silhouette - no body parts, just darkness with eyes
+
+                // Main shadow body - very dark, slightly transparent for gloomy effect
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_Rect hunterBody = {drawStartX, drawStartY, width, height};
+                SDL_SetRenderDrawColor(renderer, 15, 15, 20, 240);  // Very dark, slightly transparent
+                SDL_RenderFillRect(renderer, &hunterBody);
+
+                // Add darker gradient from top to bottom for depth
+                for (int i = 0; i < height / 3; i++) {
+                    int alpha = 240 - (i * 2);
+                    SDL_Rect gradientSlice = {drawStartX, drawStartY + i, width, 1};
+                    SDL_SetRenderDrawColor(renderer, 10, 10, 15, alpha);
+                    SDL_RenderFillRect(renderer, &gradientSlice);
+                }
+
+                // Shadowy aura around the hunter
+                SDL_Rect aura1 = {drawStartX - 4, drawStartY - 4, width + 8, height + 8};
+                SDL_SetRenderDrawColor(renderer, 5, 5, 10, 60);
+                SDL_RenderFillRect(renderer, &aura1);
+
+                SDL_Rect aura2 = {drawStartX - 2, drawStartY - 2, width + 4, height + 4};
+                SDL_SetRenderDrawColor(renderer, 8, 8, 12, 100);
+                SDL_RenderFillRect(renderer, &aura2);
+
+                // === GLOWING EYES - THE ONLY BRIGHT FEATURE ===
+                int eyeSize = std::max(5, width / 3);
+                int eyeY = drawStartY + height / 5;  // High on the head
+                int eyeSpacing = width / 5;
+
+                // Left eye - intense red/white glow (multiple layers)
+                SDL_Rect leftEyeGlow1 = {drawStartX + width/2 - eyeSpacing - eyeSize - 5, eyeY - 5, eyeSize + 10, eyeSize + 10};
+                SDL_SetRenderDrawColor(renderer, 255, 30, 30, 80);
+                SDL_RenderFillRect(renderer, &leftEyeGlow1);
+
+                SDL_Rect leftEyeGlow2 = {drawStartX + width/2 - eyeSpacing - eyeSize - 2, eyeY - 2, eyeSize + 4, eyeSize + 4};
+                SDL_SetRenderDrawColor(renderer, 255, 60, 60, 160);
+                SDL_RenderFillRect(renderer, &leftEyeGlow2);
+
+                SDL_Rect leftEye = {drawStartX + width/2 - eyeSpacing - eyeSize/2, eyeY, eyeSize, eyeSize};
+                SDL_SetRenderDrawColor(renderer, 255, 230, 230, 255);  // Bright white/red core
+                SDL_RenderFillRect(renderer, &leftEye);
+
+                // Right eye - intense red/white glow
+                SDL_Rect rightEyeGlow1 = {drawStartX + width/2 + eyeSpacing - 5, eyeY - 5, eyeSize + 10, eyeSize + 10};
+                SDL_SetRenderDrawColor(renderer, 255, 30, 30, 80);
+                SDL_RenderFillRect(renderer, &rightEyeGlow1);
+
+                SDL_Rect rightEyeGlow2 = {drawStartX + width/2 + eyeSpacing - 2, eyeY - 2, eyeSize + 4, eyeSize + 4};
+                SDL_SetRenderDrawColor(renderer, 255, 60, 60, 160);
+                SDL_RenderFillRect(renderer, &rightEyeGlow2);
+
+                SDL_Rect rightEye = {drawStartX + width/2 + eyeSpacing - eyeSize/2, eyeY, eyeSize, eyeSize};
+                SDL_SetRenderDrawColor(renderer, 255, 230, 230, 255);  // Bright white/red core
+                SDL_RenderFillRect(renderer, &rightEye);
+
+                // Floating red particles around hunter for supernatural effect
+                Uint32 particleTime = SDL_GetTicks();
+                for (int i = 0; i < 3; i++) {
+                    float particlePhase = (particleTime / 500.0f) + i * 2.0f;
+                    int particleX = drawStartX + width/2 + static_cast<int>(std::sin(particlePhase) * width);
+                    int particleY = drawStartY + height/3 + static_cast<int>(std::cos(particlePhase * 1.3f) * height/2);
+                    SDL_Rect particle = {particleX, particleY, 3, 3};
+                    SDL_SetRenderDrawColor(renderer, 255, 50, 50, 180);
+                    SDL_RenderFillRect(renderer, &particle);
+                }
+
+                // Reset blend mode
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+            } else if (sprite.type == 0) {
                 // === WALKING ANIMATION ===
                 // Create bobbing/swaying motion based on time and zombie position
                 Uint32 animTime = SDL_GetTicks();
@@ -1849,14 +2005,79 @@ namespace {
                 SDL_SetRenderDrawColor(renderer, 255, 100, 100, 120);
                 SDL_RenderDrawRect(renderer, &glow);
             } else {
-                // Weapons - draw as colored rectangle
-                SDL_Rect spriteRect = {drawStartX, drawStartY, width, height};
-                SDL_SetRenderDrawColor(renderer, sprite.color.r, sprite.color.g, sprite.color.b, sprite.color.a);
-                SDL_RenderFillRect(renderer, &spriteRect);
+                // Check if this is a hunter (tall, thin, dark Enderman-like entity)
+                bool isHunter = (sprite.type == 0 && sprite.color.r < 50 && sprite.color.g < 50 && sprite.color.b < 50);
 
-                // Draw darker outline
-                SDL_SetRenderDrawColor(renderer, sprite.color.r/2, sprite.color.g/2, sprite.color.b/2, 255);
-                SDL_RenderDrawRect(renderer, &spriteRect);
+                if (isHunter) {
+                    // === HUNTER - ENDERMAN STYLE ===
+                    // Very dark, tall, thin body with subtle shading
+                    SDL_Rect hunterBody = {drawStartX, drawStartY, width, height};
+                    SDL_SetRenderDrawColor(renderer, 25, 25, 30, 255);  // Very dark gray/black
+                    SDL_RenderFillRect(renderer, &hunterBody);
+
+                    // Darker outline for depth
+                    SDL_SetRenderDrawColor(renderer, 10, 10, 15, 255);  // Nearly black outline
+                    SDL_RenderDrawRect(renderer, &hunterBody);
+
+                    // Subtle vertical highlights on edges (makes it look 3D)
+                    SDL_Rect leftEdge = {drawStartX + 1, drawStartY, 1, height};
+                    SDL_SetRenderDrawColor(renderer, 40, 40, 45, 255);
+                    SDL_RenderFillRect(renderer, &leftEdge);
+
+                    SDL_Rect rightEdge = {drawStartX + width - 2, drawStartY, 1, height};
+                    SDL_SetRenderDrawColor(renderer, 15, 15, 20, 255);
+                    SDL_RenderFillRect(renderer, &rightEdge);
+
+                    // === TERRIFYING GLOWING RED/WHITE EYES ===
+                    // Eyes positioned high on the body (like Enderman)
+                    int eyeSize = std::max(4, width / 3);  // Bigger eyes for thin face
+                    int eyeY = drawStartY + height / 6;  // High up on the head
+                    int eyeSpacing = width / 4;
+
+                    // Left eye - intense red glow
+                    SDL_Rect leftEyeGlow = {drawStartX + eyeSpacing - eyeSize - 3, eyeY - 3, eyeSize + 6, eyeSize + 6};
+                    SDL_SetRenderDrawColor(renderer, 255, 40, 40, 140);  // Strong red glow
+                    SDL_RenderFillRect(renderer, &leftEyeGlow);
+
+                    SDL_Rect leftEyeInner = {drawStartX + eyeSpacing - eyeSize - 1, eyeY - 1, eyeSize + 2, eyeSize + 2};
+                    SDL_SetRenderDrawColor(renderer, 255, 100, 100, 200);  // Medium glow
+                    SDL_RenderFillRect(renderer, &leftEyeInner);
+
+                    SDL_Rect leftEye = {drawStartX + eyeSpacing - eyeSize/2, eyeY, eyeSize, eyeSize};
+                    SDL_SetRenderDrawColor(renderer, 255, 220, 220, 255);  // Bright white/red core
+                    SDL_RenderFillRect(renderer, &leftEye);
+
+                    // Right eye - intense red glow
+                    SDL_Rect rightEyeGlow = {drawStartX + width - eyeSpacing - 3, eyeY - 3, eyeSize + 6, eyeSize + 6};
+                    SDL_SetRenderDrawColor(renderer, 255, 40, 40, 140);  // Strong red glow
+                    SDL_RenderFillRect(renderer, &rightEyeGlow);
+
+                    SDL_Rect rightEyeInner = {drawStartX + width - eyeSpacing - 1, eyeY - 1, eyeSize + 2, eyeSize + 2};
+                    SDL_SetRenderDrawColor(renderer, 255, 100, 100, 200);  // Medium glow
+                    SDL_RenderFillRect(renderer, &rightEyeInner);
+
+                    SDL_Rect rightEye = {drawStartX + width - eyeSpacing + eyeSize/2, eyeY, eyeSize, eyeSize};
+                    SDL_SetRenderDrawColor(renderer, 255, 220, 220, 255);  // Bright white/red core
+                    SDL_RenderFillRect(renderer, &rightEye);
+
+                    // Particle effect - small red dots floating around hunter
+                    if ((rand() % 3) == 0) {  // Random particles
+                        int particleX = drawStartX + (rand() % width);
+                        int particleY = drawStartY + (rand() % height);
+                        SDL_Rect particle = {particleX, particleY, 2, 2};
+                        SDL_SetRenderDrawColor(renderer, 255, 50, 50, 150);
+                        SDL_RenderFillRect(renderer, &particle);
+                    }
+                } else {
+                    // Weapons and other sprites - draw as colored rectangle
+                    SDL_Rect spriteRect = {drawStartX, drawStartY, width, height};
+                    SDL_SetRenderDrawColor(renderer, sprite.color.r, sprite.color.g, sprite.color.b, sprite.color.a);
+                    SDL_RenderFillRect(renderer, &spriteRect);
+
+                    // Draw darker outline
+                    SDL_SetRenderDrawColor(renderer, sprite.color.r/2, sprite.color.g/2, sprite.color.b/2, 255);
+                    SDL_RenderDrawRect(renderer, &spriteRect);
+                }
             }
 
             // Draw health bar above zombies
@@ -2425,9 +2646,36 @@ namespace {
         float scaleY = (float)MINIMAP_SIZE / (Maze::HEIGHT * Maze::TILE_SIZE);
 
         // Render maze walls
+        // Outside testing mode: only show nearby walls (fog of war)
+        bool isTestingMode = (state.difficulty == Difficulty::TESTING);
+        float playerTileX = state.player->getX() / Maze::TILE_SIZE;
+        float playerTileY = state.player->getY() / Maze::TILE_SIZE;
+        float visibilityRadius = isTestingMode ? 9999.0f : 8.0f;  // Show 8 tiles around player in normal mode
+
         for (int y = 0; y < Maze::HEIGHT; y++) {
             for (int x = 0; x < Maze::WIDTH; x++) {
-                if (state.maze->isWall(x, y)) {
+                // Check distance to player (for fog of war outside testing mode)
+                float dx = x - playerTileX;
+                float dy = y - playerTileY;
+                float distance = std::sqrt(dx*dx + dy*dy);
+                bool isVisible = (distance <= visibilityRadius);
+
+                if (!isTestingMode && !isVisible) {
+                    continue;  // Skip tiles that are too far in normal mode
+                }
+
+                if (state.maze->isSafeRoom(x, y)) {
+                    // BLUE SAFE ROOM - render it blue!
+                    SDL_Rect safeRoomRect = {
+                        MINIMAP_X + (int)(x * Maze::TILE_SIZE * scaleX),
+                        MINIMAP_Y + (int)(y * Maze::TILE_SIZE * scaleY),
+                        std::max(2, (int)(Maze::TILE_SIZE * scaleX)),
+                        std::max(2, (int)(Maze::TILE_SIZE * scaleY))
+                    };
+                    // Bright blue with glow effect
+                    SDL_SetRenderDrawColor(renderer, 50, 150, 255, 255);
+                    SDL_RenderFillRect(renderer, &safeRoomRect);
+                } else if (state.maze->isWall(x, y)) {
                     SDL_Rect wallRect = {
                         MINIMAP_X + (int)(x * Maze::TILE_SIZE * scaleX),
                         MINIMAP_Y + (int)(y * Maze::TILE_SIZE * scaleY),
@@ -2436,7 +2684,8 @@ namespace {
                     };
                     SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
                     SDL_RenderFillRect(renderer, &wallRect);
-                } else if (state.maze->isExit(x, y)) {
+                } else if (state.maze->isExit(x, y) && isTestingMode) {
+                    // Only show exit in testing mode
                     SDL_Rect exitRect = {
                         MINIMAP_X + (int)(x * Maze::TILE_SIZE * scaleX),
                         MINIMAP_Y + (int)(y * Maze::TILE_SIZE * scaleY),
@@ -2449,52 +2698,97 @@ namespace {
             }
         }
 
-        // Render keys
-        for (const auto& key : state.keys) {
-            if (!key->isCollected()) {
-                int mapX = MINIMAP_X + (int)(key->getX() * scaleX);
-                int mapY = MINIMAP_Y + (int)(key->getY() * scaleY);
-                SDL_Rect keyRect = {mapX - 2, mapY - 2, 4, 4};
-                SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-                SDL_RenderFillRect(renderer, &keyRect);
-            }
-        }
-
-        // Render weapon pickups
-        for (const auto& weapon : state.weaponPickups) {
-            if (!weapon->isCollected()) {
-                int mapX = MINIMAP_X + (int)(weapon->getX() * scaleX);
-                int mapY = MINIMAP_Y + (int)(weapon->getY() * scaleY);
-                SDL_Rect weaponRect = {mapX - 2, mapY - 2, 4, 4};
-                if (weapon->getIsAmmo()) {
-                    SDL_SetRenderDrawColor(renderer, 255, 180, 50, 255);  // Orange for ammo
-                } else {
-                    SDL_SetRenderDrawColor(renderer, 100, 180, 255, 255);  // Blue for weapons
+        // Only show entities in TESTING mode - normal mode shows only walls/player
+        if (isTestingMode) {
+            // Render keys
+            for (const auto& key : state.keys) {
+                if (!key->isCollected()) {
+                    int mapX = MINIMAP_X + (int)(key->getX() * scaleX);
+                    int mapY = MINIMAP_Y + (int)(key->getY() * scaleY);
+                    SDL_Rect keyRect = {mapX - 2, mapY - 2, 4, 4};
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+                    SDL_RenderFillRect(renderer, &keyRect);
                 }
-                SDL_RenderFillRect(renderer, &weaponRect);
+            }
+
+            // Render weapon pickups
+            for (const auto& weapon : state.weaponPickups) {
+                if (!weapon->isCollected()) {
+                    int mapX = MINIMAP_X + (int)(weapon->getX() * scaleX);
+                    int mapY = MINIMAP_Y + (int)(weapon->getY() * scaleY);
+                    SDL_Rect weaponRect = {mapX - 2, mapY - 2, 4, 4};
+                    if (weapon->getIsAmmo()) {
+                        SDL_SetRenderDrawColor(renderer, 255, 180, 50, 255);  // Orange for ammo
+                    } else {
+                        SDL_SetRenderDrawColor(renderer, 100, 180, 255, 255);  // Blue for weapons
+                    }
+                    SDL_RenderFillRect(renderer, &weaponRect);
+                }
+            }
+
+            // Render health boosts
+            for (const auto& health : state.healthBoosts) {
+                if (!health->isCollected()) {
+                    int mapX = MINIMAP_X + (int)(health->getX() * scaleX);
+                    int mapY = MINIMAP_Y + (int)(health->getY() * scaleY);
+                    SDL_Rect healthRect = {mapX - 2, mapY - 2, 4, 4};
+                    SDL_SetRenderDrawColor(renderer, 50, 255, 50, 255);  // Green for health
+                    SDL_RenderFillRect(renderer, &healthRect);
+                }
+            }
+
+            // Render zombies
+            for (const auto& zombie : state.zombies) {
+                if (!zombie->isDead()) {
+                    int mapX = MINIMAP_X + (int)(zombie->getX() * scaleX);
+                    int mapY = MINIMAP_Y + (int)(zombie->getY() * scaleY);
+                    SDL_Rect zombieRect = {mapX - 2, mapY - 2, 4, 4};
+                    SDL_SetRenderDrawColor(renderer, 255, 50, 50, 255);
+                    SDL_RenderFillRect(renderer, &zombieRect);
+                }
+            }
+
+            // Render hunters (dark purple entities)
+            for (const auto& hunter : state.hunters) {
+                if (!hunter->isDead()) {
+                    int mapX = MINIMAP_X + (int)(hunter->getX() * scaleX);
+                    int mapY = MINIMAP_Y + (int)(hunter->getY() * scaleY);
+                    SDL_Rect hunterRect = {mapX - 2, mapY - 2, 5, 5};  // Slightly bigger than zombies
+                    SDL_SetRenderDrawColor(renderer, 150, 50, 200, 255);  // Dark purple
+                    SDL_RenderFillRect(renderer, &hunterRect);
+                    // Add border to make them stand out
+                    SDL_SetRenderDrawColor(renderer, 200, 100, 255, 255);  // Lighter purple border
+                    SDL_RenderDrawRect(renderer, &hunterRect);
+                }
             }
         }
 
-        // Render health boosts
-        for (const auto& health : state.healthBoosts) {
-            if (!health->isCollected()) {
-                int mapX = MINIMAP_X + (int)(health->getX() * scaleX);
-                int mapY = MINIMAP_Y + (int)(health->getY() * scaleY);
-                SDL_Rect healthRect = {mapX - 2, mapY - 2, 4, 4};
-                SDL_SetRenderDrawColor(renderer, 50, 255, 50, 255);  // Green for health
-                SDL_RenderFillRect(renderer, &healthRect);
-            }
-        }
+        // Render spawn location indicator (purple square) when spawn at crosshair is enabled
+        if (state.spawnAtCrosshair && state.showTestingPanel) {
+            // Calculate spawn position using same logic as weapon/zombie spawning
+            float angle = state.player->getAngle();
+            float pitch = state.player->getPitch();
+            float baseRange = 150.0f;  // Closer spawn range
+            float pitchFactor = 1.0f + pitch;
+            pitchFactor = std::max(0.3f, std::min(3.0f, pitchFactor));
+            float adjustedRange = baseRange * pitchFactor;
+            float spawnX = state.player->getX() + std::cos(angle) * adjustedRange;
+            float spawnY = state.player->getY() + std::sin(angle) * adjustedRange;
 
-        // Render zombies
-        for (const auto& zombie : state.zombies) {
-            if (!zombie->isDead()) {
-                int mapX = MINIMAP_X + (int)(zombie->getX() * scaleX);
-                int mapY = MINIMAP_Y + (int)(zombie->getY() * scaleY);
-                SDL_Rect zombieRect = {mapX - 2, mapY - 2, 4, 4};
-                SDL_SetRenderDrawColor(renderer, 255, 50, 50, 255);
-                SDL_RenderFillRect(renderer, &zombieRect);
-            }
+            // Draw purple spawn indicator on minimap
+            int spawnMapX = MINIMAP_X + (int)(spawnX * scaleX);
+            int spawnMapY = MINIMAP_Y + (int)(spawnY * scaleY);
+
+            // Draw pulsing purple square
+            float pulseAmount = 0.7f + 0.3f * std::sin(SDL_GetTicks() * 0.005f);
+            int squareSize = static_cast<int>(6 * pulseAmount);
+            SDL_Rect spawnRect = {spawnMapX - squareSize/2, spawnMapY - squareSize/2, squareSize, squareSize};
+            SDL_SetRenderDrawColor(renderer, 200, 100, 255, 255);  // Purple
+            SDL_RenderFillRect(renderer, &spawnRect);
+
+            // Draw border for visibility
+            SDL_SetRenderDrawColor(renderer, 255, 150, 255, 255);  // Lighter purple
+            SDL_RenderDrawRect(renderer, &spawnRect);
         }
 
         // Render player
@@ -2522,9 +2816,162 @@ namespace {
         SDL_RenderDrawLine(renderer, endX, endY, arrow1X, arrow1Y);
         SDL_RenderDrawLine(renderer, endX, endY, arrow2X, arrow2Y);
 
+        // Cardinal directions (N, S, E, W) - always visible
+        // North (top)
+        renderText(renderer, "N", MINIMAP_X + MINIMAP_SIZE/2 - 3, MINIMAP_Y - 12, 1);
+        // South (bottom)
+        renderText(renderer, "S", MINIMAP_X + MINIMAP_SIZE/2 - 3, MINIMAP_Y + MINIMAP_SIZE + 4, 1);
+        // West (left)
+        renderText(renderer, "W", MINIMAP_X - 10, MINIMAP_Y + MINIMAP_SIZE/2 - 4, 1);
+        // East (right)
+        renderText(renderer, "E", MINIMAP_X + MINIMAP_SIZE + 4, MINIMAP_Y + MINIMAP_SIZE/2 - 4, 1);
+
         // Border
         SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
         SDL_RenderDrawRect(renderer, &minimap);
+    }
+
+    void renderTestingPanel(SDL_Renderer* renderer, PlayState& state) {
+        const int PANEL_WIDTH = 300;
+        const int PANEL_HEIGHT = 560;  // Increased for spawn mode toggle and hunter button
+        const int PANEL_X = Game::SCREEN_WIDTH - PANEL_WIDTH - 20;
+        const int PANEL_Y = 20;
+
+        // Semi-transparent dark background
+        SDL_Rect panelBg = {PANEL_X - 5, PANEL_Y - 5, PANEL_WIDTH + 10, PANEL_HEIGHT + 10};
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+        SDL_RenderFillRect(renderer, &panelBg);
+
+        // Border
+        SDL_SetRenderDrawColor(renderer, 100, 255, 100, 255);
+        SDL_RenderDrawRect(renderer, &panelBg);
+
+        int yOffset = PANEL_Y + 10;
+        int lineHeight = 30;
+
+        // Title
+        SDL_Rect titleBg = {PANEL_X, yOffset, PANEL_WIDTH, 25};
+        SDL_SetRenderDrawColor(renderer, 50, 150, 50, 255);
+        SDL_RenderFillRect(renderer, &titleBg);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        renderText(renderer, "TESTING PANEL", PANEL_X + 70, yOffset + 8, 2);
+        yOffset += 35;
+
+        // God Mode Toggle
+        SDL_Rect godModeBox = {PANEL_X + 10, yOffset, 20, 20};
+        if (state.godMode) {
+            SDL_SetRenderDrawColor(renderer, 100, 255, 100, 255);
+            SDL_RenderFillRect(renderer, &godModeBox);
+            // X mark when checked
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDrawLine(renderer, PANEL_X + 12, yOffset + 10, PANEL_X + 28, yOffset + 10);
+            SDL_RenderDrawLine(renderer, PANEL_X + 20, yOffset + 5, PANEL_X + 20, yOffset + 15);
+        }
+        SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+        SDL_RenderDrawRect(renderer, &godModeBox);
+
+        // God mode label
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        renderText(renderer, "GOD MODE", PANEL_X + 40, yOffset + 5, 2);
+        yOffset += lineHeight;
+
+        // Spawn Location Mode Toggle
+        SDL_Rect spawnModeBox = {PANEL_X + 10, yOffset, 20, 20};
+        if (state.spawnAtCrosshair) {
+            SDL_SetRenderDrawColor(renderer, 100, 255, 100, 255);
+            SDL_RenderFillRect(renderer, &spawnModeBox);
+            // X mark when checked
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDrawLine(renderer, PANEL_X + 12, yOffset + 10, PANEL_X + 28, yOffset + 10);
+            SDL_RenderDrawLine(renderer, PANEL_X + 20, yOffset + 5, PANEL_X + 20, yOffset + 15);
+        }
+        SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+        SDL_RenderDrawRect(renderer, &spawnModeBox);
+
+        // Spawn mode label
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        renderText(renderer, "SPAWN AT CROSSHAIR", PANEL_X + 40, yOffset + 5, 2);
+        yOffset += lineHeight;
+
+        // Weapon Spawning Section
+        yOffset += 10;
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        renderText(renderer, "SPAWN WEAPON", PANEL_X + 10, yOffset, 2);
+        yOffset += 20;
+
+        // Weapon buttons with text labels
+        const char* weaponNames[] = {"SHOTGUN", "PISTOL", "AR", "GRENADE", "SMG", "SNIPER", "FLAME"};
+        for (int i = 0; i < 7; i++) {
+            SDL_Rect weaponBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+            if (state.selectedWeaponSpawn == i) {
+                SDL_SetRenderDrawColor(renderer, 100, 150, 255, 255);
+            } else {
+                SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
+            }
+            SDL_RenderFillRect(renderer, &weaponBtn);
+            SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+            SDL_RenderDrawRect(renderer, &weaponBtn);
+
+            // Render weapon name
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            renderText(renderer, weaponNames[i], PANEL_X + 15, yOffset + 6, 2);
+            yOffset += 25;
+        }
+
+        yOffset += 10;
+        // Zombie Spawning Section
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        renderText(renderer, "SPAWN ENTITIES", PANEL_X + 10, yOffset, 2);
+        yOffset += 20;
+
+        // Spawn zombie button
+        SDL_Rect spawnZombieBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+        SDL_SetRenderDrawColor(renderer, 150, 50, 50, 255);
+        SDL_RenderFillRect(renderer, &spawnZombieBtn);
+        SDL_SetRenderDrawColor(renderer, 255, 100, 100, 255);
+        SDL_RenderDrawRect(renderer, &spawnZombieBtn);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        renderText(renderer, "SPAWN ZOMBIE", PANEL_X + 106, yOffset + 6, 2);
+        yOffset += 25;
+
+        // Spawn hunter button
+        SDL_Rect spawnHunterBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+        SDL_SetRenderDrawColor(renderer, 40, 20, 60, 255);  // Dark purple
+        SDL_RenderFillRect(renderer, &spawnHunterBtn);
+        SDL_SetRenderDrawColor(renderer, 100, 50, 150, 255);
+        SDL_RenderDrawRect(renderer, &spawnHunterBtn);
+        SDL_SetRenderDrawColor(renderer, 200, 150, 255, 255);
+        renderText(renderer, "SPAWN HUNTER", PANEL_X + 100, yOffset + 6, 2);
+        yOffset += 30;
+
+        // Trigger Blood Moon button
+        SDL_Rect bloodMoonBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+        SDL_SetRenderDrawColor(renderer, 120, 0, 0, 255);
+        SDL_RenderFillRect(renderer, &bloodMoonBtn);
+        SDL_SetRenderDrawColor(renderer, 200, 50, 50, 255);
+        SDL_RenderDrawRect(renderer, &bloodMoonBtn);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        renderText(renderer, "BLOOD MOON", PANEL_X + 90, yOffset + 6, 2);
+        yOffset += 30;
+
+        // Trigger Blue Alert button
+        SDL_Rect blueAlertBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+        SDL_SetRenderDrawColor(renderer, 0, 80, 150, 255);
+        SDL_RenderFillRect(renderer, &blueAlertBtn);
+        SDL_SetRenderDrawColor(renderer, 100, 180, 255, 255);
+        SDL_RenderDrawRect(renderer, &blueAlertBtn);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        renderText(renderer, "BLUE ALERT", PANEL_X + 96, yOffset + 6, 2);
+
+        // Instructions at bottom
+        yOffset = PANEL_Y + PANEL_HEIGHT - 45;
+        SDL_Rect instrBg = {PANEL_X + 5, yOffset, PANEL_WIDTH - 10, 40};
+        SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
+        SDL_RenderFillRect(renderer, &instrBg);
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        renderText(renderer, "CLICK BUTTONS TO USE", PANEL_X + 40, yOffset + 8, 1);
+        renderText(renderer, "F1 TO CLOSE PANEL", PANEL_X + 52, yOffset + 22, 1);
     }
 
     void initializeGame(PlayState& state, Difficulty difficulty, MazeType mazeType = MazeType::STANDARD, bool isLevelProgression = false) {
@@ -2881,6 +3328,13 @@ void Game::run() {
                         if (playState.difficulty == Difficulty::TESTING) {
                             playState.showTestingPanel = !playState.showTestingPanel;
                             std::cout << "Testing Panel: " << (playState.showTestingPanel ? "ON" : "OFF") << std::endl;
+
+                            // Unlock mouse when panel is open, lock when closed
+                            if (playState.showTestingPanel) {
+                                SDL_SetRelativeMouseMode(SDL_FALSE);  // Unlock mouse for clicking
+                            } else {
+                                SDL_SetRelativeMouseMode(SDL_TRUE);  // Lock mouse for gameplay
+                            }
                         }
                     }
                 } else if (menu.currentState == GameState::PAUSED) {
@@ -2929,13 +3383,190 @@ void Game::run() {
                 }
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                 if (menu.currentState == GameState::PLAYING) {
-                    mousePressed = true;
+                    // Check if testing panel is open and handle clicks
+                    if (playState.showTestingPanel && playState.difficulty == Difficulty::TESTING) {
+                        int mouseX = event.button.x;
+                        int mouseY = event.button.y;
+
+                        const int PANEL_WIDTH = 300;
+                        const int PANEL_X = Game::SCREEN_WIDTH - PANEL_WIDTH - 20;
+                        const int PANEL_Y = 20;
+
+                        // Calculate exact positions matching render function
+                        int yOffset = PANEL_Y + 10;  // Start position
+                        yOffset += 35;  // After title
+
+                        // Check god mode checkbox click
+                        SDL_Rect godModeBox = {PANEL_X + 10, yOffset, 20, 20};
+                        if (mouseX >= godModeBox.x && mouseX <= godModeBox.x + godModeBox.w &&
+                            mouseY >= godModeBox.y && mouseY <= godModeBox.y + godModeBox.h) {
+                            playState.godMode = !playState.godMode;
+                            std::cout << "God Mode: " << (playState.godMode ? "ON" : "OFF") << std::endl;
+                        }
+
+                        yOffset += 30;  // After god mode
+
+                        // Check spawn mode toggle click
+                        SDL_Rect spawnModeBox = {PANEL_X + 10, yOffset, 20, 20};
+                        if (mouseX >= spawnModeBox.x && mouseX <= spawnModeBox.x + spawnModeBox.w &&
+                            mouseY >= spawnModeBox.y && mouseY <= spawnModeBox.y + spawnModeBox.h) {
+                            playState.spawnAtCrosshair = !playState.spawnAtCrosshair;
+                            std::cout << "Spawn Location: " << (playState.spawnAtCrosshair ? "CROSSHAIR" : "PLAYER") << std::endl;
+                        }
+
+                        yOffset += 30;  // After spawn mode
+                        yOffset += 10;  // Weapon section spacing
+                        yOffset += 20;  // After weapon title
+
+                        // Check weapon buttons (7 buttons)
+                        for (int i = 0; i < 7; i++) {
+                            SDL_Rect weaponBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+                            if (mouseX >= weaponBtn.x && mouseX <= weaponBtn.x + weaponBtn.w &&
+                                mouseY >= weaponBtn.y && mouseY <= weaponBtn.y + weaponBtn.h) {
+                                // Spawn weapon at player position or crosshair
+                                WeaponType weaponType = static_cast<WeaponType>(i);
+                                float spawnX, spawnY;
+
+                                if (playState.spawnAtCrosshair) {
+                                    // Calculate crosshair position using aiming logic
+                                    float angle = playState.player->getAngle();
+                                    float pitch = playState.player->getPitch();
+                                    float baseRange = 150.0f;  // Closer spawn range
+                                    float pitchFactor = 1.0f + pitch;
+                                    pitchFactor = std::max(0.3f, std::min(3.0f, pitchFactor));
+                                    float adjustedRange = baseRange * pitchFactor;
+                                    spawnX = playState.player->getX() + std::cos(angle) * adjustedRange;
+                                    spawnY = playState.player->getY() + std::sin(angle) * adjustedRange;
+                                } else {
+                                    // Spawn in front of player facing direction
+                                    float angle = playState.player->getAngle();
+                                    float spawnDist = 100.0f;  // Distance in front of player
+                                    spawnX = playState.player->getX() + std::cos(angle) * spawnDist;
+                                    spawnY = playState.player->getY() + std::sin(angle) * spawnDist;
+                                }
+
+                                playState.weaponPickups.push_back(std::make_unique<WeaponPickup>(spawnX, spawnY, weaponType, false));
+                                std::cout << "Spawned weapon type " << i << " at " << (playState.spawnAtCrosshair ? "crosshair" : "player") << std::endl;
+                            }
+                            yOffset += 25;
+                        }
+
+                        yOffset += 10;  // Zombie section spacing
+                        yOffset += 20;  // After zombie title
+
+                        // Check spawn zombie button
+                        SDL_Rect spawnZombieBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+                        if (mouseX >= spawnZombieBtn.x && mouseX <= spawnZombieBtn.x + spawnZombieBtn.w &&
+                            mouseY >= spawnZombieBtn.y && mouseY <= spawnZombieBtn.y + spawnZombieBtn.h) {
+                            float spawnX, spawnY;
+
+                            if (playState.spawnAtCrosshair) {
+                                // Calculate crosshair position
+                                float angle = playState.player->getAngle();
+                                float pitch = playState.player->getPitch();
+                                float baseRange = 150.0f;  // Closer spawn range
+                                float pitchFactor = 1.0f + pitch;
+                                pitchFactor = std::max(0.3f, std::min(3.0f, pitchFactor));
+                                float adjustedRange = baseRange * pitchFactor;
+                                spawnX = playState.player->getX() + std::cos(angle) * adjustedRange;
+                                spawnY = playState.player->getY() + std::sin(angle) * adjustedRange;
+                            } else {
+                                // Spawn in front of player facing direction
+                                float angle = playState.player->getAngle();
+                                float spawnDist = 100.0f;  // Distance in front of player
+                                spawnX = playState.player->getX() + std::cos(angle) * spawnDist;
+                                spawnY = playState.player->getY() + std::sin(angle) * spawnDist;
+                            }
+
+                            playState.zombies.push_back(std::make_unique<Zombie>(spawnX, spawnY, playState.zombieMaxHealth));
+                            std::cout << "Spawned zombie at " << (playState.spawnAtCrosshair ? "crosshair" : "player") << std::endl;
+                        }
+
+                        yOffset += 25;  // After spawn zombie button
+
+                        // Check spawn hunter button
+                        SDL_Rect spawnHunterBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+                        if (mouseX >= spawnHunterBtn.x && mouseX <= spawnHunterBtn.x + spawnHunterBtn.w &&
+                            mouseY >= spawnHunterBtn.y && mouseY <= spawnHunterBtn.y + spawnHunterBtn.h) {
+                            float spawnX, spawnY;
+
+                            if (playState.spawnAtCrosshair) {
+                                // Calculate crosshair position
+                                float angle = playState.player->getAngle();
+                                float pitch = playState.player->getPitch();
+                                float baseRange = 150.0f;  // Closer spawn range
+                                float pitchFactor = 1.0f + pitch;
+                                pitchFactor = std::max(0.3f, std::min(3.0f, pitchFactor));
+                                float adjustedRange = baseRange * pitchFactor;
+                                spawnX = playState.player->getX() + std::cos(angle) * adjustedRange;
+                                spawnY = playState.player->getY() + std::sin(angle) * adjustedRange;
+                            } else {
+                                // Spawn in front of player facing direction
+                                float angle = playState.player->getAngle();
+                                float spawnDist = 100.0f;  // Distance in front of player
+                                spawnX = playState.player->getX() + std::cos(angle) * spawnDist;
+                                spawnY = playState.player->getY() + std::sin(angle) * spawnDist;
+                            }
+
+                            // Spawn hunter (dark, fast zombie-like entity with high health)
+                            playState.hunters.push_back(std::make_unique<Zombie>(spawnX, spawnY, 999));
+                            std::cout << "Spawned hunter at " << (playState.spawnAtCrosshair ? "crosshair" : "player") << std::endl;
+                        }
+
+                        yOffset += 30;  // After spawn hunter button
+
+                        // Check blood moon button
+                        SDL_Rect bloodMoonBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+                        if (mouseX >= bloodMoonBtn.x && mouseX <= bloodMoonBtn.x + bloodMoonBtn.w &&
+                            mouseY >= bloodMoonBtn.y && mouseY <= bloodMoonBtn.y + bloodMoonBtn.h) {
+                            // Trigger blood moon event
+                            if (!playState.bloodMoonActive) {
+                                playState.bloodMoonActive = true;
+                                playState.bloodMoonTimer = 0.0f;
+                                std::cout << "Blood Moon activated!" << std::endl;
+                            }
+                        }
+
+                        yOffset += 30;  // After blood moon button
+
+                        // Check blue alert button
+                        SDL_Rect blueAlertBtn = {PANEL_X + 10, yOffset, PANEL_WIDTH - 20, 22};
+                        if (mouseX >= blueAlertBtn.x && mouseX <= blueAlertBtn.x + blueAlertBtn.w &&
+                            mouseY >= blueAlertBtn.y && mouseY <= blueAlertBtn.y + blueAlertBtn.h) {
+                            // Trigger blue alert event
+                            if (!playState.blueAlertActive) {
+                                playState.blueAlertActive = true;
+                                playState.blueAlertTimer = 0.0f;
+                                playState.safeRoomLocked = false;  // Unlock the room
+
+                                // Store safe room coordinates
+                                Vec2 safePos = playState.maze->getSafeRoomPos();
+                                playState.blueRoomX = (int)(safePos.x / Maze::TILE_SIZE);
+                                playState.blueRoomY = (int)(safePos.y / Maze::TILE_SIZE);
+
+                                // Kill all zombies
+                                int zombiesKilled = 0;
+                                for (auto& zombie : playState.zombies) {
+                                    if (!zombie->isDead()) {
+                                        while (!zombie->isDead()) {
+                                            zombie->takeDamage();
+                                        }
+                                        zombiesKilled++;
+                                    }
+                                }
+
+                                std::cout << "Blue Alert activated! " << zombiesKilled << " zombies eliminated!" << std::endl;
+                            }
+                        }
+                    } else {
+                        mousePressed = true;
+                    }
                 }
             } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
                 mousePressed = false;
             } else if (event.type == SDL_MOUSEMOTION) {
-                if (menu.currentState == GameState::PLAYING) {
-                    // Rotate player based on mouse movement
+                if (menu.currentState == GameState::PLAYING && !playState.showTestingPanel) {
+                    // Only rotate camera if testing panel is not open
                     float sensitivity = 0.003f;
 
                     // Horizontal rotation (left/right)
@@ -3201,6 +3832,117 @@ void Game::run() {
                 }
             }
 
+            // === BLUE ALERT EVENT SYSTEM (Evacuation) ===
+            // Separate timer from blood moon
+            static float blueEventTimer = 0.0f;
+
+            if (!playState.blueAlertActive) {
+                blueEventTimer += deltaTime;
+
+                // Trigger blue alert every 3 minutes
+                if (blueEventTimer >= playState.blueAlertInterval) {
+                    playState.blueAlertActive = true;
+                    playState.blueAlertTimer = 0.0f;
+                    blueEventTimer = 0.0f;  // Reset for next cycle
+                    playState.safeRoomLocked = false;  // Unlock the room for evacuation
+
+                    // Store safe room coordinates
+                    Vec2 safePos = playState.maze->getSafeRoomPos();
+                    playState.blueRoomX = (int)(safePos.x / Maze::TILE_SIZE);
+                    playState.blueRoomY = (int)(safePos.y / Maze::TILE_SIZE);
+
+                    // KILL ALL ZOMBIES when blue alert starts
+                    int zombiesKilled = 0;
+                    for (auto& zombie : playState.zombies) {
+                        if (!zombie->isDead()) {
+                            while (!zombie->isDead()) {
+                                zombie->takeDamage();
+                            }
+                            zombiesKilled++;
+                        }
+                    }
+
+                    std::cout << "\n=== BLUE ALERT! EVACUATE TO SAFE ROOM! ===\n" << std::endl;
+                    std::cout << "All " << zombiesKilled << " zombies eliminated by evacuation protocol!" << std::endl;
+                    std::cout << "You have 45 seconds to reach the blue room!" << std::endl;
+                }
+            }
+
+            // During blue alert
+            if (playState.blueAlertActive) {
+                playState.blueAlertTimer += deltaTime;
+
+                // Check if player is in safe room
+                int playerTileX = (int)(playState.player->getX() / Maze::TILE_SIZE);
+                int playerTileY = (int)(playState.player->getY() / Maze::TILE_SIZE);
+                playState.inSafeRoom = playState.maze->isSafeRoom(playerTileX, playerTileY);
+
+                // Timer expired - check if player made it
+                if (playState.blueAlertTimer >= playState.blueAlertDuration) {
+                    // LOCK THE SAFE ROOM after timer expires
+                    playState.safeRoomLocked = true;
+                    std::cout << "\n=== SAFE ROOM SEALED! ===\n" << std::endl;
+
+                    if (!playState.inSafeRoom && playState.difficulty != Difficulty::TESTING && !playState.godMode) {
+                        // START HUNTER PHASE instead of instant death!
+                        playState.hunterPhaseActive = true;
+                        playState.hunterPhaseTimer = 0.0f;
+
+                        // Spawn 3-5 fast hunters around the player
+                        int numHunters = 3 + (rand() % 3);  // 3-5 hunters
+                        for (int i = 0; i < numHunters; i++) {
+                            float angle = (float)i * (M_PI * 2.0f / numHunters);
+                            float spawnDist = 200.0f + (rand() % 100);  // 200-300 units away
+                            float spawnX = playState.player->getX() + cos(angle) * spawnDist;
+                            float spawnY = playState.player->getY() + sin(angle) * spawnDist;
+
+                            // Make sure not spawning in wall
+                            int tileX = (int)(spawnX / Maze::TILE_SIZE);
+                            int tileY = (int)(spawnY / Maze::TILE_SIZE);
+                            if (!playState.maze->isWall(tileX, tileY)) {
+                                playState.hunters.push_back(std::make_unique<Zombie>(spawnX, spawnY, 999));
+                            }
+                        }
+
+                        std::cout << "=== FAILED TO EVACUATE! ===\n" << std::endl;
+                        std::cout << "=== HUNTER PHASE ACTIVATED! ===\n" << std::endl;
+                        std::cout << numHunters << " dark hunters have been unleashed!" << std::endl;
+                        std::cout << "Survive for 60 seconds!" << std::endl;
+                    } else if (playState.inSafeRoom) {
+                        std::cout << "=== EVACUATION SUCCESSFUL! ===\n" << std::endl;
+                        std::cout << "You survived the blue alert! The room is now sealed." << std::endl;
+                    }
+
+                    // End the alert
+                    playState.blueAlertActive = false;
+                    playState.blueAlertTimer = 0.0f;
+                }
+            }
+
+            // HUNTER PHASE - 60 seconds of terror!
+            if (playState.hunterPhaseActive) {
+                playState.hunterPhaseTimer += deltaTime;
+
+                // Check if hunter phase is over
+                if (playState.hunterPhaseTimer >= playState.hunterPhaseDuration) {
+                    // Kill all hunters
+                    for (auto& hunter : playState.hunters) {
+                        if (!hunter->isDead()) {
+                            while (!hunter->isDead()) {
+                                hunter->takeDamage();
+                            }
+                        }
+                    }
+                    playState.hunters.clear();
+
+                    playState.hunterPhaseActive = false;
+                    playState.hunterPhaseTimer = 0.0f;
+
+                    std::cout << "\n=== HUNTER PHASE ENDED! ===\n" << std::endl;
+                    std::cout << "You survived! The hunters have retreated." << std::endl;
+                }
+            }
+
             // Zombie spawning system - spawn reinforcements when zombies are low (SKIP for Soldier mode)
             if (playState.mazeType != MazeType::SOLDIER) {
                 playState.spawnTimer += deltaTime;
@@ -3303,8 +4045,8 @@ void Game::run() {
 
                 // Check if zombie caught player
                 if (zombie->checkCollision(playState.player->getX(), playState.player->getY(), playState.player->getRadius())) {
-                    // In testing mode, player is immortal
-                    if (playState.difficulty != Difficulty::TESTING) {
+                    // In testing mode or with god mode, player is immortal
+                    if (playState.difficulty != Difficulty::TESTING && !playState.godMode) {
                         if (playState.player->takeDamage()) {
                             // Player took damage
                             std::cout << "Hit! Health: " << playState.player->getHealth() << "/" << playState.player->getMaxHealth() << std::endl;
@@ -3333,6 +4075,75 @@ void Game::run() {
                             std::cout << "Respawning in 2 seconds..." << std::endl;
                         }
                     }
+                    }
+                }
+            }
+
+            // Update hunters (fast, dark entities)
+            for (auto& hunter : playState.hunters) {
+                // Store previous position in case hunter tries to enter safe room
+                float prevX = hunter->getX();
+                float prevY = hunter->getY();
+
+                // Hunters move faster than zombies - pass the hunter vector instead of zombie vector
+                hunter->update(deltaTime, playState.player->getX(), playState.player->getY(), *playState.maze, &playState.hunters);
+
+                // PREVENT HUNTERS FROM ENTERING BLUE SAFE ROOM
+                int hunterTileX = (int)(hunter->getX() / Maze::TILE_SIZE);
+                int hunterTileY = (int)(hunter->getY() / Maze::TILE_SIZE);
+                if (playState.maze->isSafeRoom(hunterTileX, hunterTileY)) {
+                    // Hunter tried to enter safe room - push them back!
+                    hunter->setPosition(prevX, prevY);
+                }
+
+                // Hunters make scary breathing sounds (no groans)
+                if (!hunter->isDead() && (rand() % 200) == 0) {  // Less frequent than zombies
+                    float dx = hunter->getX() - playState.player->getX();
+                    float dy = hunter->getY() - playState.player->getY();
+                    float distance = std::sqrt(dx * dx + dy * dy);
+
+                    if (distance < 600.0f) {
+                        // Play scary sound (using zombie sound for now, but quieter/different)
+                        float volumeFactor = (1.0f - distance / 600.0f);
+                        int volume = static_cast<int>(MIX_MAX_VOLUME * volumeFactor * 0.5f);  // Quieter
+                        if (volume > MIX_MAX_VOLUME) volume = MIX_MAX_VOLUME;
+
+                        // Use groan sound pitched differently for hunters
+                        if (zombieGroanSound) {
+                            Mix_VolumeChunk(zombieGroanSound, volume);
+                            Mix_PlayChannel(-1, zombieGroanSound, 0);
+                        }
+                    }
+                }
+
+                // Check if hunter caught player
+                if (hunter->checkCollision(playState.player->getX(), playState.player->getY(), playState.player->getRadius())) {
+                    // Hunters damage player in same way as zombies
+                    if (playState.difficulty != Difficulty::TESTING && !playState.godMode) {
+                        if (playState.player->takeDamage()) {
+                            std::cout << "HUNTER HIT! Health: " << playState.player->getHealth() << "/" << playState.player->getMaxHealth() << std::endl;
+
+                            if (playState.player->isDead()) {
+                                menu.currentState = GameState::GAME_LOST;
+                                playState.deathTime = currentTime;
+
+                                int timeSurvived = (currentTime - playState.gameStartTime) / 1000;
+                                playState.score += timeSurvived;
+                                playState.totalScore += playState.score;
+
+                                Mix_PlayChannel(-1, playerDeathSound, 0);
+                                std::cout << "Killed by hunter! Score: " << playState.score << " | Total: " << playState.totalScore << std::endl;
+
+                                if (isHighScore(playState.totalScore)) {
+                                    addHighScore(playState.totalScore, playState.currentLevel,
+                                               mazeTypeToString(playState.mazeType),
+                                               difficultyToString(menu.difficulty));
+                                    std::cout << "NEW HIGH SCORE!" << std::endl;
+                                }
+
+                                std::cout << "Respawning in 2 seconds..." << std::endl;
+                            }
+                        }
                     }
                 }
             }
@@ -3443,6 +4254,31 @@ void Game::run() {
                                 break;
                             }
                         }
+
+                        // Check hunters
+                        for (auto& hunter : playState.hunters) {
+                            if (!hunter->isDead() &&
+                                hunter->checkCollision(checkX, checkY, bullet->getRadius())) {
+                                hitSomething = true;
+                                explosionX = checkX;
+                                explosionY = checkY;
+
+                                if (!bullet->isExplosive()) {
+                                    // Regular bullet: single target damage
+                                    hunter->takeDamage(bullet->getDamage());
+
+                                    // Award MORE points for killing hunters (they're harder)
+                                    if (hunter->isDead()) {
+                                        playState.score += 500;  // 500 points per hunter kill
+                                        Mix_PlayChannel(-1, zombieDeathSound, 0);  // Play death sound
+                                        std::cout << "Hunter eliminated! +500 points" << std::endl;
+                                    }
+                                }
+
+                                bullet->deactivate();
+                                break;
+                            }
+                        }
                     }
 
                     // EXPLOSIVE DAMAGE: If this was an explosive bullet and it hit something
@@ -3473,10 +4309,37 @@ void Game::run() {
                             }
                         }
 
-                        // Play explosion sound if zombies were killed
-                        if (zombiesKilledInExplosion > 0) {
+                        // Damage ALL hunters within explosion radius
+                        int huntersKilledInExplosion = 0;
+                        for (auto& hunter : playState.hunters) {
+                            if (!hunter->isDead()) {
+                                float dx = hunter->getX() - explosionX;
+                                float dy = hunter->getY() - explosionY;
+                                float distance = std::sqrt(dx * dx + dy * dy);
+
+                                if (distance <= explosionRadius) {
+                                    float damageMult = 1.0f - (distance / explosionRadius) * 0.5f;
+                                    int damage = static_cast<int>(bullet->getDamage() * damageMult);
+                                    hunter->takeDamage(damage);
+
+                                    if (hunter->isDead()) {
+                                        huntersKilledInExplosion++;
+                                        playState.score += 500;  // 500 points per hunter
+                                    }
+                                }
+                            }
+                        }
+
+                        // Play explosion sound if zombies or hunters were killed
+                        if (zombiesKilledInExplosion > 0 || huntersKilledInExplosion > 0) {
                             Mix_PlayChannel(-1, zombieDeathSound, 0);
-                            std::cout << "EXPLOSION! Killed " << zombiesKilledInExplosion << " zombies!" << std::endl;
+                            if (zombiesKilledInExplosion > 0 && huntersKilledInExplosion > 0) {
+                                std::cout << "EXPLOSION! Killed " << zombiesKilledInExplosion << " zombies and " << huntersKilledInExplosion << " hunters!" << std::endl;
+                            } else if (zombiesKilledInExplosion > 0) {
+                                std::cout << "EXPLOSION! Killed " << zombiesKilledInExplosion << " zombies!" << std::endl;
+                            } else {
+                                std::cout << "EXPLOSION! Killed " << huntersKilledInExplosion << " hunters!" << std::endl;
+                            }
                         }
 
                         // Add screen shake for explosion
@@ -3977,6 +4840,116 @@ void Game::run() {
                 SDL_RenderFillRect(renderer, &warningBg);
                 SDL_SetRenderDrawColor(renderer, 255, 50, 50, 255);
                 SDL_RenderDrawRect(renderer, &warningBg);
+            }
+
+            // === BLUE ALERT OVERLAY ===
+            if (menu.currentState == GameState::PLAYING && playState.blueAlertActive) {
+                // Pulsing blue overlay effect
+                float pulseIntensity = 0.5f + 0.3f * std::sin(playState.blueAlertTimer * 5.0f);
+                int blueAlpha = static_cast<int>(60 * pulseIntensity);
+
+                SDL_Rect fullScreen = {0, 0, screenW, screenH};
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 100, 200, blueAlpha);
+                SDL_RenderFillRect(renderer, &fullScreen);
+
+                // Warning text
+                int remainingTime = static_cast<int>(playState.blueAlertDuration - playState.blueAlertTimer);
+
+                // Draw warning at top of screen
+                SDL_Rect warningBg = {screenW/2 - 150, 50, 300, 80};
+                SDL_SetRenderDrawColor(renderer, 0, 50, 150, 220);
+                SDL_RenderFillRect(renderer, &warningBg);
+                SDL_SetRenderDrawColor(renderer, 100, 200, 255, 255);
+                SDL_RenderDrawRect(renderer, &warningBg);
+
+                // Render warning text
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                renderText(renderer, "BLUE ALERT", screenW/2 - 60, 58, 3);
+                renderText(renderer, "EVACUATE TO SAFE ROOM", screenW/2 - 126, 85, 2);
+
+                // Timer
+                std::string timeStr = std::to_string(remainingTime) + "s";
+                renderText(renderer, timeStr.c_str(), screenW/2 - 12, 108, 2);
+
+                // Arrow pointing to safe room (if not in it)
+                if (!playState.inSafeRoom) {
+                    Vec2 safePos = playState.maze->getSafeRoomPos();
+                    float dx = safePos.x - playState.player->getX();
+                    float dy = safePos.y - playState.player->getY();
+                    float angleToRoom = std::atan2(dy, dx);
+
+                    // Draw arrow at center top of screen
+                    int arrowCenterX = screenW / 2;
+                    int arrowCenterY = 150;
+                    int arrowLength = 40;
+                    int arrowEndX = arrowCenterX + (int)(std::cos(angleToRoom) * arrowLength);
+                    int arrowEndY = arrowCenterY + (int)(std::sin(angleToRoom) * arrowLength);
+
+                    SDL_SetRenderDrawColor(renderer, 100, 200, 255, 255);
+                    SDL_RenderDrawLine(renderer, arrowCenterX, arrowCenterY, arrowEndX, arrowEndY);
+
+                    // Arrow head
+                    int arrow1X = arrowEndX + (int)(std::cos(angleToRoom - 2.5f) * 10);
+                    int arrow1Y = arrowEndY + (int)(std::sin(angleToRoom - 2.5f) * 10);
+                    int arrow2X = arrowEndX + (int)(std::cos(angleToRoom + 2.5f) * 10);
+                    int arrow2Y = arrowEndY + (int)(std::sin(angleToRoom + 2.5f) * 10);
+                    SDL_RenderDrawLine(renderer, arrowEndX, arrowEndY, arrow1X, arrow1Y);
+                    SDL_RenderDrawLine(renderer, arrowEndX, arrowEndY, arrow2X, arrow2Y);
+                } else {
+                    // Show "SAFE" indicator
+                    SDL_SetRenderDrawColor(renderer, 100, 255, 100, 255);
+                    renderText(renderer, "SAFE", screenW/2 - 24, 150, 3);
+                }
+            }
+
+            // === HUNTER PHASE OVERLAY ===
+            if (menu.currentState == GameState::PLAYING && playState.hunterPhaseActive) {
+                // Pulsing dark red overlay effect (more intense than blood moon)
+                float pulseIntensity = 0.6f + 0.4f * std::sin(playState.hunterPhaseTimer * 6.0f);
+                int darkAlpha = static_cast<int>(80 * pulseIntensity);
+
+                SDL_Rect fullScreen = {0, 0, screenW, screenH};
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 100, 0, 0, darkAlpha);  // Dark red
+                SDL_RenderFillRect(renderer, &fullScreen);
+
+                // Warning text
+                int remainingTime = static_cast<int>(playState.hunterPhaseDuration - playState.hunterPhaseTimer);
+
+                // Draw warning at top of screen with dark/scary theme
+                SDL_Rect warningBg = {screenW/2 - 180, 50, 360, 100};
+                SDL_SetRenderDrawColor(renderer, 60, 0, 0, 240);  // Very dark red, almost black
+                SDL_RenderFillRect(renderer, &warningBg);
+                SDL_SetRenderDrawColor(renderer, 200, 50, 50, 255);  // Red border
+                SDL_RenderDrawRect(renderer, &warningBg);
+
+                // Render scary warning text
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                renderText(renderer, "!!! HUNTER PHASE !!!", screenW/2 - 132, 58, 3);
+                renderText(renderer, "SURVIVE", screenW/2 - 45, 85, 2);
+
+                // Countdown timer (large and scary)
+                std::string timeStr = std::to_string(remainingTime) + "s";
+                int textWidth = timeStr.length() * 6;  // Approximate width
+                renderText(renderer, timeStr.c_str(), screenW/2 - textWidth, 110, 3);
+
+                // Render active hunter count
+                int aliveHunters = 0;
+                for (const auto& hunter : playState.hunters) {
+                    if (!hunter->isDead()) {
+                        aliveHunters++;
+                    }
+                }
+                std::string hunterStr = std::to_string(aliveHunters) + " HUNTERS";
+                int hunterTextWidth = hunterStr.length() * 4;
+                SDL_SetRenderDrawColor(renderer, 255, 100, 100, 255);  // Light red
+                renderText(renderer, hunterStr.c_str(), screenW/2 - hunterTextWidth, 135, 2);
+            }
+
+            // Render testing panel (F1 to toggle, only in TESTING mode)
+            if (playState.showTestingPanel && playState.difficulty == Difficulty::TESTING) {
+                renderTestingPanel(renderer, playState);
             }
 
             // Render pause menu overlay

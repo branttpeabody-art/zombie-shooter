@@ -83,6 +83,32 @@ void Maze::generateRandomMaze() {
     tiles[HEIGHT-3][WIDTH-2] = TileType::Empty;
     tiles[HEIGHT-2][WIDTH-3] = TileType::Empty;
 
+    // Create safe room (3x3 blue room) in a random location away from start and exit
+    int safeX, safeY;
+    bool foundSafeSpot = false;
+    for (int attempt = 0; attempt < 100 && !foundSafeSpot; attempt++) {
+        safeX = 5 + (rand() % (WIDTH - 12));
+        safeY = 5 + (rand() % (HEIGHT - 12));
+
+        // Check it's far from start (1,1) and exit (WIDTH-2, HEIGHT-2)
+        int distFromStart = abs(safeX - 1) + abs(safeY - 1);
+        int distFromExit = abs(safeX - (WIDTH-2)) + abs(safeY - (HEIGHT-2));
+
+        if (distFromStart > 15 && distFromExit > 10) {
+            foundSafeSpot = true;
+        }
+    }
+
+    // Create 3x3 safe room
+    for (int y = safeY; y < safeY + 3 && y < HEIGHT-1; y++) {
+        for (int x = safeX; x < safeX + 3 && x < WIDTH-1; x++) {
+            tiles[y][x] = TileType::SafeRoom;
+        }
+    }
+
+    // Store safe room center position
+    safeRoomPos = {(safeX + 1.5f) * TILE_SIZE, (safeY + 1.5f) * TILE_SIZE};
+
     // Ensure start position is clear
     tiles[1][1] = TileType::Empty;
     tiles[1][2] = TileType::Empty;
@@ -471,6 +497,32 @@ void Maze::render(SDL_Renderer* renderer) const {
                     SDL_RenderDrawRect(renderer, &rect);
                     break;
                 }
+                case TileType::SafeRoom: {
+                    // Blue safe room with glowing effect
+                    SDL_SetRenderDrawColor(renderer, 50, 100, 200, 255);
+                    SDL_RenderFillRect(renderer, &rect);
+
+                    // Bright blue glow
+                    SDL_SetRenderDrawColor(renderer, 100, 150, 255, 150);
+                    SDL_Rect glowTop = {rect.x, rect.y - 2, rect.w, 2};
+                    SDL_RenderFillRect(renderer, &glowTop);
+                    SDL_Rect glowBottom = {rect.x, rect.y + rect.h, rect.w, 2};
+                    SDL_RenderFillRect(renderer, &glowBottom);
+                    SDL_Rect glowLeft = {rect.x - 2, rect.y, 2, rect.h};
+                    SDL_RenderFillRect(renderer, &glowLeft);
+                    SDL_Rect glowRight = {rect.x + rect.w, rect.y, 2, rect.h};
+                    SDL_RenderFillRect(renderer, &glowRight);
+
+                    // Inner highlight
+                    SDL_Rect highlight = {rect.x + 4, rect.y + 4, rect.w - 8, rect.h - 8};
+                    SDL_SetRenderDrawColor(renderer, 120, 180, 255, 255);
+                    SDL_RenderFillRect(renderer, &highlight);
+
+                    // Border
+                    SDL_SetRenderDrawColor(renderer, 30, 60, 150, 255);
+                    SDL_RenderDrawRect(renderer, &rect);
+                    break;
+                }
                 case TileType::Empty: {
                     // Floor with slight grid pattern
                     SDL_SetRenderDrawColor(renderer, 35, 35, 35, 255);
@@ -496,6 +548,11 @@ bool Maze::isExit(int x, int y) const {
     return tiles[y][x] == TileType::Exit;
 }
 
+bool Maze::isSafeRoom(int x, int y) const {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return false;
+    return tiles[y][x] == TileType::SafeRoom;
+}
+
 TileType Maze::getTile(int x, int y) const {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return TileType::Wall;
     return tiles[y][x];
@@ -503,6 +560,10 @@ TileType Maze::getTile(int x, int y) const {
 
 Vec2 Maze::getExitPos() const {
     return {(WIDTH-2) * TILE_SIZE + TILE_SIZE/2.0f, (HEIGHT-2) * TILE_SIZE + TILE_SIZE/2.0f};
+}
+
+Vec2 Maze::getSafeRoomPos() const {
+    return safeRoomPos;
 }
 
 Vec2 Maze::getSpawnPositionAwayFromZombies(const std::vector<Vec2>& existingZombies, Vec2 playerPos) const {

@@ -7,7 +7,8 @@
 enum class TileType {
     Empty,
     Wall,
-    Exit
+    Exit,
+    SafeRoom  // Blue safe room for evacuation events
 };
 
 enum class MazeType {
@@ -32,10 +33,12 @@ public:
     void render(SDL_Renderer* renderer) const;
     bool isWall(int x, int y) const;
     bool isExit(int x, int y) const;
+    bool isSafeRoom(int x, int y) const;
     TileType getTile(int x, int y) const;
 
     Vec2 getPlayerStart() const;
     Vec2 getExitPos() const;
+    Vec2 getSafeRoomPos() const;
 
     std::vector<Vec2> getRandomKeyPositions(int count) const;
     std::vector<Vec2> getRandomZombiePositions(int count, Vec2 playerPos) const;
@@ -49,6 +52,7 @@ private:
     std::vector<std::vector<TileType>> tiles;
     MazeType mazeType;
     std::vector<Vec2> exitPositions;  // Store multiple exit positions for infinite mode
+    Vec2 safeRoomPos;  // Blue safe room position for evacuation events
     void generateRandomMaze();
     void generateCircularMaze();
     void generateInfiniteMaze();

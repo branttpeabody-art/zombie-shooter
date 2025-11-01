@@ -25,7 +25,10 @@ emcc \
     -s USE_SDL=2 \
     -s USE_SDL_MIXER=2 \
     -s ALLOW_MEMORY_GROWTH=1 \
-    -s TOTAL_MEMORY=67108864 \
+    -s INITIAL_MEMORY=134217728 \
+    -s MAXIMUM_MEMORY=268435456 \
+    -s STACK_SIZE=5242880 \
+    -s ASSERTIONS=1 \
     -s EXPORTED_RUNTIME_METHODS='["ccall"]' \
     -s EXPORTED_FUNCTIONS='["_main"]' \
     --shell-file zombie_shell.html \

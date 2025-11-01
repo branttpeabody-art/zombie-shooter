@@ -28,6 +28,8 @@ public:
     float getY() const { return y; }
     float getRadius() const { return radius; }
 
+    void setPosition(float newX, float newY) { x = newX; y = newY; }
+
     bool isDead() const { return dead; }
     void takeDamage(int damage = 1) {
         health -= damage;
